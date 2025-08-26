@@ -1,0 +1,98 @@
+name: terraform-plan-template 
+
+# Specifies that this workflow can be called by other workflows
+on:
+  workflow_call:
+    inputs:
+      working_directory:
+        description: 'Path to the directory containing Terraform configuration files'
+        required: true
+        type: string
+      terraform_version:
+        description: 'Terraform version'
+        required: true
+        type: string
+        default: "1.5.7"
+      aws_iam_role_arn:
+        description: 'AWS IAM Role ARN'
+        required: true
+        type: string
+      aws_iam_role_session_name:
+        description: 'AWS IAM Role Session Name'
+        required: true
+        type: string
+      aws_region:
+        description: 'AWS Region'
+        required: true
+        type: string
+        default: "eu-central-1"
+      environment:
+        description: 'Environment'
+        required: false
+        type: string
+      backend_config_file:
+        description: 'Optional backend config file path'
+        required: false
+        type: string
+        
+      
+    outputs:
+      terraform_plan_output:  
+        description: 'Output from the terraform-plan-template workflow'
+        value: ${{ jobs.terraform-plan.outputs.job_output }}
+
+# Specifies the jobs within this workflow
+jobs:
+  terraform-plan:
+    runs-on: ubuntu-latest
+    
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working_directory }}
+
+    outputs:
+      terraform_plan_output: ${{ steps.terraform-plan.outputs.step_output }}
+
+    # List of steps to execute in this job
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: configure-aws-credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.aws_iam_role_arn }}
+          role-session-name: ${{ inputs.aws_iam_role_session_name }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: terraform-setup
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+          terraform_wrapper: false
+
+      - name: terraform-init
+        id: init
+        shell: bash
+        run: |
+          if [ -n "${{ inputs.environment }}" ] && [ -f "${{ inputs.backend_config_file }}" ]; then
+            terraform init -backend-config="${{ inputs.backend_config_file }}"
+          else
+            terraform init
+          fi
+
+      - name: terraform-fmt
+        id: fmt
+        run: terraform fmt -check
+
+      - name: terraform-validate
+        id: validate
+        run: |
+          terraform validate
+          echo "::set-output name=stdout::$(terraform validate -no-color)"
+
+      - name: terraform-plan
+        id: plan
+        run: |
+          terraform plan -lock=false -out=plan.tmp
+          terraform show -no-color plan.tmp >${GITHUB_WORKSPACE}/plan.out

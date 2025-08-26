@@ -1,0 +1,113 @@
+name: build-push-aws-ecr-template
+
+on:
+  workflow_call:
+    inputs:
+      aws_region:
+        description: "AWS region for the ECR registry"
+        required: true
+        type: string
+      dockerfile_path:
+        description: "The path where the Dockerfile is"
+        required: false
+        type: string
+        default: "."
+      ecr_repo_name:
+        description: "AWS ECR repository name"
+        required: true
+        type: string
+      image_tag:
+        description: "Docker image tag"
+        required: true
+        type: string
+      role_to_assume:
+        description: "Role to assume for AWS ECR"
+        required: true
+        type: string
+      role_session_name:
+        description: "Role session name for AWS ECR"
+        required: true
+        type: string
+      build_args:
+        description: "Build arguments to pass to Docker"
+        required: false
+        type: string
+        default: ''
+      env_vars:
+        description: "Environment variables required during build time"
+        required: false
+        type: string
+        default: ''
+      sonarqube_url:
+        description: 'SonarQube URL'
+        required: true
+        type: string
+      sonarqube_project_key:
+        description: 'SonarQube Project Key'
+        required: true
+        type: string
+    secrets:
+      app_secrets:
+        description: "Application environment variables secrets required during build time"
+        required: false
+      sonarqube_token:
+        required: true        
+
+jobs:
+  build-image:
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: .
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: checkout-repository
+        uses: actions/checkout@v3
+
+      - name: configure-aws-credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.role_to_assume }}
+          role-session-name: ${{ inputs.role_session_name }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: login-aws-ecr
+        id: login_ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: setup-docker-buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: build-docker-image
+        run: |
+          echo "${{ inputs.env_vars }} \n ${{ secrets.app_secrets }}" > .env
+
+          IMAGE_TAG="${{ steps.login_ecr.outputs.registry }}/${{ inputs.ecr_repo_name }}:${{ inputs.image_tag }}"
+          DOCKERFILE="${{ inputs.dockerfile_path }}"
+          BUILD_ARGS=$(echo "${{ inputs.build_args }}" | grep -v '^$' | sed 's/^/--build-arg /' | tr '\n' ' ')
+
+          if [[ -n "${{ inputs.build_args }}" ]]; then
+            docker build . -t "$IMAGE_TAG" -f "$DOCKERFILE" $BUILD_ARGS
+          else
+            docker build . -t "$IMAGE_TAG" -f "$DOCKERFILE"
+          fi
+
+      - name: push-docker-image
+        run: |
+          docker push ${{ steps.login_ecr.outputs.registry }}/${{ inputs.ecr_repo_name }}:${{ inputs.image_tag }}
+
+      - name: sonarqube-scan
+        uses: SonarSource/sonarqube-scan-action@v5.2.0 # Ex: v4.1.0, See the latest version at https://github.com/marketplace/actions/official-sonarqube-scan
+        continue-on-error: true
+        with:
+          projectBaseDir: .
+          args: >
+            -Dsonar.projectKey=${{ inputs.sonarqube_project_key }}
+        env:
+          SONAR_TOKEN: ${{ secrets.sonarqube_token }}
+          SONAR_HOST_URL: ${{ inputs.sonarqube_url }}

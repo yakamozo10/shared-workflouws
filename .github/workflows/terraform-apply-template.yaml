@@ -1,0 +1,135 @@
+name: terraform-apply-template
+
+# Specifies that this workflow can be called by other workflows
+on:
+  workflow_call:
+    inputs:
+      working_directory:
+        description: 'Path to the directory containing the Dockerfile'
+        required: true
+        type: string
+      terraform_version:
+        description: 'Terraform Version'
+        required: true
+        type: string
+        default: "1.5.7"
+      aws_iam_role_arn:
+        description: 'AWS IAM Role ARN'
+        required: true
+        type: string  
+      aws_iam_role_session_name:
+        description: 'AWS IAM Role Session Name'
+        required: true
+        type: string  
+      aws_region:
+        description: 'AWS Region'
+        required: true
+        type: string  
+        default: "eu-central-1"
+      environment:
+        description: 'Environment'
+        required: false
+        type: string
+      backend_config_file:
+        description: 'Optional backend config file path'
+        required: false
+        type: string
+      sonarqube_url:
+        description: 'SonarQube URL'
+        required: true
+        type: string
+      sonarqube_project_key:
+        description: 'SonarQube Project Key'
+        required: true
+        type: string
+      module_vars:
+        description: "Terraform module variables"
+        required: false
+        type: string
+        default: ''
+    secrets:
+      sonarqube_token:
+        required: true
+      module_secrets:
+        description: "Terraform module secrets"
+        required: false
+      
+    outputs:
+      terraform_apply_output:
+        description: 'Output from the terraform-apply-template workflow'
+        value: ${{ jobs.terraform-apply.outputs.job_output }}
+
+# Specifies the jobs within this workflow
+jobs:
+  terraform-apply:
+    runs-on: ubuntu-latest  
+
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working_directory }}
+
+    outputs:
+      terraform_apply_output: ${{ steps.terraform-apply.outputs.step_output }}
+
+    # List of steps to execute in this job
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          #fetches the complete git history instead of just the latest commit. This is important for SonarQube to perform proper SCM analysis and track issues over time. 
+          fetch-depth: 0 
+
+      - name: configure-aws-credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.aws_iam_role_arn }}
+          role-session-name: ${{ inputs.aws_iam_role_session_name }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: terraform-setup
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+          terraform_wrapper: false
+
+      - name: terraform-init
+        id: init
+        shell: bash
+        run: |
+          cat << 'EOF' > terraform.tfvars
+          ${{ inputs.module_vars }}
+          ${{ secrets.module_secrets }}
+          EOF
+
+          if [ -n "${{ inputs.environment }}" ] && [ -f "${{ inputs.backend_config_file }}" ]; then
+            terraform init -backend-config="${{ inputs.backend_config_file }}"
+          else
+            terraform init
+          fi
+
+      - name: terraform-fmt
+        id: fmt
+        run: terraform fmt -check
+        continue-on-error: true
+
+      - name: terraform-validate
+        id: validate
+        run: |
+          terraform validate
+          echo "::set-output name=stdout::$(terraform validate -no-color)"
+
+      - name: sonarqube-scan
+        uses: SonarSource/sonarqube-scan-action@v5.2.0 # Ex: v4.1.0, See the latest version at https://github.com/marketplace/actions/official-sonarqube-scan
+        continue-on-error: true
+        with:
+          projectBaseDir: ${{ inputs.working_directory }}
+          args: >
+            -Dsonar.projectKey=${{ inputs.sonarqube_project_key }}
+        env:
+          SONAR_TOKEN: ${{ secrets.sonarqube_token }}
+          SONAR_HOST_URL: ${{ inputs.sonarqube_url }}
+
+      - name: terraform-apply
+        id: apply
+        run: |
+          terraform apply -lock=false -auto-approve -no-color
